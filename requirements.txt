@@ -1,0 +1,10 @@
+pandas
+numpy
+scikit-learn
+scipy
+torch
+torchvision
+torchaudio
+tqdm
+streamlit
+implicit
