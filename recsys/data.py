@@ -1,104 +1,127 @@
+# recsys/data.py
+from __future__ import annotations
 import os, pickle
 from typing import Tuple, Dict, List
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
+# ---------- 1) ONE canonical splitter (no negatives) ----------
+def prepare_splits(
+    data_dir: str = "data",
+    out_dir: str = "outputs",
+    min_user_inter: int = 5,
+    min_item_inter: int = 5,
+    seed: int = 42,
+):
+    """
+    Load -> filter -> reindex -> per-user 70/15/15 split.
+    This is the SINGLE source of truth. No negatives here.
+    Caches splits + mappings in `out_dir` for reuse.
+    Returns (train_df, val_df, test_df, stats_dict)
+    """
+    os.makedirs(out_dir, exist_ok=True)
 
-# Load data
-def load_anime_ratings(data_dir: str = "data") -> Tuple[pd.DataFrame, pd.DataFrame]:
-    anime = pd.read_csv(os.path.join(data_dir, "anime.csv"))
+    cache = os.path.join(out_dir, "splits_cached.flag")
+    if os.path.exists(cache):
+        # Fast path: load cached splits/mappings
+        train = pd.read_parquet(os.path.join(out_dir, "train.parquet"))
+        val   = pd.read_parquet(os.path.join(out_dir, "val.parquet"))
+        test  = pd.read_parquet(os.path.join(out_dir, "test.parquet"))
+        with open(os.path.join(out_dir, "mappings.pkl"), "rb") as f:
+            m = pickle.load(f)
+        return train, val, test, {"num_users": m["num_users"], "num_items": m["num_items"]}
+
+    # --- load raw ---
+    anime   = pd.read_csv(os.path.join(data_dir, "anime.csv"))
     ratings = pd.read_csv(os.path.join(data_dir, "rating.csv"))
-    ratings = ratings[ratings["rating"] != -1].copy()  # drop "not rated"
-    return anime, ratings
+    # keep explicit interactions (drop -1 = not watched
+    ratings = ratings[ratings["rating"] != -1].copy()
 
-#  Drop users and itemss with too few interactions
-def filter_sparse(ratings: pd.DataFrame, min_user_inter: int = 5, min_item_inter: int = 5,) -> pd.DataFrame:
+    # --- filter sparsity ---
     uc = ratings["user_id"].value_counts()
     ic = ratings["anime_id"].value_counts()
-
-    keep_users = uc[uc >= min_user_inter].index
-    keep_items = ic[ic >= min_item_inter].index
-
-    filtered = ratings[
-        ratings["user_id"].isin(keep_users) &
-        ratings["anime_id"].isin(keep_items)
+    ratings = ratings[
+        ratings["user_id"].isin(uc[uc >= min_user_inter].index) &
+        ratings["anime_id"].isin(ic[ic >= min_item_inter].index)
     ].copy()
-    return filtered
 
-# Reindexing to contiguous ids
-def reindex_ids(ratings: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[int,int], Dict[int,int]]:
-    uid_map = {uid: idx for idx, uid in enumerate(ratings["user_id"].unique())}
-    iid_map = {aid: idx for idx, aid in enumerate(ratings["anime_id"].unique())}
-    ratings_idx = ratings.copy()
-    ratings_idx["u"] = ratings_idx["user_id"].map(uid_map)
-    ratings_idx["i"] = ratings_idx["anime_id"].map(iid_map)
-    return ratings_idx, uid_map, iid_map
+    # --- reindex to 0..U-1 / 0..I-1 ---
+    uid_map = {u:i for i,u in enumerate(ratings["user_id"].unique())}
+    iid_map = {a:j for j,a in enumerate(ratings["anime_id"].unique())}
+    ratings["u"] = ratings["user_id"].map(uid_map).astype("int64")
+    ratings["i"] = ratings["anime_id"].map(iid_map).astype("int64")
 
-# stratified split per user: 70% train, 15% val, 15% test
-# ensure each user has at least one interaction in each split
-def split_per_user(ratings_idx: pd.DataFrame, seed: int = 42):
+    num_users = ratings["u"].nunique()
+    num_items = ratings["i"].nunique()
+
+    # --- per-user 70/15/15 split (fixed seed) ---
     rng = np.random.default_rng(seed)
-    parts = []
-    for u, g in ratings_idx.groupby("u"):
-        idx = g.index.to_numpy()
-        rng.shuffle(idx)
-        n = len(idx)
-        n_train = max(1, int(0.70*n))
-        n_val   = max(1, int(0.15*n))
-        train_idx = idx[:n_train]
-        val_idx   = idx[n_train:n_train+n_val]
-        test_idx  = idx[n_train+n_val:]
-        # ensure non-empty splits
-        if len(test_idx) == 0 and len(val_idx) > 1:
-            test_idx = np.array([val_idx[-1]])
-            val_idx = val_idx[:-1]
-        parts.append((
-            ratings_idx.loc[train_idx],
-            ratings_idx.loc[val_idx],
-            ratings_idx.loc[test_idx]
-        ))
-    train = pd.concat([p[0] for p in parts], ignore_index=True)
-    val   = pd.concat([p[1] for p in parts], ignore_index=True)
-    test  = pd.concat([p[2] for p in parts], ignore_index=True)
-    return train, val, test
+    def split_user(g: pd.DataFrame):
+        idx = np.arange(len(g)); rng.shuffle(idx)
+        n = len(g)
+        n_tr = max(1, int(0.70 * n))
+        n_va = max(1, int(0.15 * n))
+        tr = g.iloc[idx[:n_tr]]
+        va = g.iloc[idx[n_tr:n_tr+n_va]]
+        te = g.iloc[idx[n_tr+n_va:]]
+        return tr, va, te
 
+    parts = [split_user(g) for _, g in ratings.groupby("u", sort=False)]
+    train = pd.concat([p[0] for p in parts], ignore_index=True)[["u","i"]]
+    val   = pd.concat([p[1] for p in parts], ignore_index=True)[["u","i"]]
+    test  = pd.concat([p[2] for p in parts], ignore_index=True)[["u","i"]]
 
-# Items per user
-def _user_pos_map(df: pd.DataFrame):
+    # --- cache to disk ---
+    train.to_parquet(os.path.join(out_dir, "train.parquet"), index=False)
+    val.to_parquet(os.path.join(out_dir, "val.parquet"), index=False)
+    test.to_parquet(os.path.join(out_dir, "test.parquet"), index=False)
+    with open(os.path.join(out_dir, "mappings.pkl"), "wb") as f:
+        pickle.dump({"uids": uid_map, "iids": iid_map,
+                     "num_users": num_users, "num_items": num_items}, f)
+    open(cache, "w").close()
+
+    return train, val, test, {"num_users": num_users, "num_items": num_items}
+
+# ---------- 2) (Optional) build TRAIN pointwise pairs for neural/BCE ----------
+def _user_pos_map(df: pd.DataFrame) -> Dict[int, set]:
     return df.groupby("u")["i"].apply(set).to_dict()
 
-# Build user[], items[], ratings[] pairs
-# rating = 1 for positive, 0 for negative
-# For each positive interaction, sample neg_k negatives from unseen items
-def build_pointwise_pairs(train, num_items, neg_k=4, seed=42):
-    import numpy as np
-    from tqdm import tqdm
-
+def build_pointwise_pairs(
+    train: pd.DataFrame,
+    num_items: int,
+    neg_k: int = 4,
+    seed: int = 42,
+):
+    """
+    For NeuMF-like pointwise BCE training.
+    Returns numpy arrays (users, items, labels) with 1 positive + neg_k negatives per positive.
+    """
     rng = np.random.default_rng(seed)
     pos = _user_pos_map(train)
-    all_items = np.arange(num_items)
+    all_items = np.arange(num_items, dtype=np.int64)
 
     users, items, labels = [], [], []
-    train_local = train[["u", "i"]].astype({"u": "int64", "i": "int64"})
-
+    train_local = train[["u","i"]].astype({"u":"int64","i":"int64"})
     for _, row in tqdm(train_local.iterrows(), total=len(train_local), desc="Build train pairs"):
-        u = int(row["u"])
-        i = int(row["i"])
-
+        u = int(row["u"]); i = int(row["i"])
         users.append(u); items.append(i); labels.append(1)
-
         seen = pos.get(u, set())
-        pool = np.setdiff1d(all_items, np.fromiter(seen, dtype=int), assume_unique=True)
+        seen_arr = np.fromiter(seen, dtype=np.int64) if seen else np.empty(0, dtype=np.int64)
+        pool = np.setdiff1d(all_items, seen_arr, assume_unique=True)
         k = min(neg_k, len(pool))
-        negs = rng.choice(pool, size=k, replace=False) if k > 0 else rng.choice(all_items, size=neg_k, replace=True)
-
+        if k > 0:
+            negs = rng.choice(pool, size=k, replace=False)
+        else:  # extremely rare
+            negs = rng.choice(all_items, size=neg_k, replace=True)
         for j in negs:
             users.append(u); items.append(int(j)); labels.append(0)
 
-    return np.array(users), np.array(items), np.array(labels, dtype=np.float32)
+    return (np.array(users, dtype=np.int64),
+            np.array(items, dtype=np.int64),
+            np.array(labels, dtype=np.float32))
 
-#For each (user, true_item) in val/test, create a small candidate set: [ true_item, neg1, neg2, ... ]
+# ---------- 3) (Optional) build eval candidates (true+negatives) ----------
 def build_eval_candidates(
     train: pd.DataFrame,
     split: pd.DataFrame,
@@ -106,93 +129,22 @@ def build_eval_candidates(
     num_negs: int = 99,
     seed: int = 123,
 ):
+    """
+    Candidate lists for ranking metrics:
+    returns users, truths, candidates where candidates[row][0] is the TRUE item.
+    """
     rng = np.random.default_rng(seed)
     pos = _user_pos_map(train)
-    all_items = np.arange(num_items)
+    all_items = np.arange(num_items, dtype=np.int64)
 
-    users = split["u"].to_numpy()
-    truths = split["i"].to_numpy()
+    users = split["u"].to_numpy(dtype=np.int64)
+    truths = split["i"].to_numpy(dtype=np.int64)
     cands: List[np.ndarray] = []
-
     for u, t in zip(users, truths):
         seen = pos.get(int(u), set())
-        pool = np.setdiff1d(all_items, np.fromiter(seen, dtype=int), assume_unique=True)
+        seen_arr = np.fromiter(seen, dtype=np.int64) if seen else np.empty(0, dtype=np.int64)
+        pool = np.setdiff1d(all_items, seen_arr, assume_unique=True)
         k = min(num_negs, len(pool))
-        if k > 0:
-            negs = rng.choice(pool, size=k, replace=False)
-        else:
-            negs = rng.choice(all_items, size=num_negs, replace=True)
-
-        cand = np.concatenate([[t], negs])  # true first
-        cands.append(cand)
-
-    return users, truths, np.stack(cands)
-
-# 5) ONE-CALL DRIVER: PREPARE + SAVE EVERYTHING
-# =============================================================================
-
-def prepare_all(
-    data_dir="data",
-    out_dir="outputs",
-    min_user_inter=5,
-    min_item_inter=5,
-    neg_k=4,
-    num_eval_negs=99,
-    seed=42,
-):
-    """
-    One function to call from your training script.
-    It will:
-      1) Load + clean
-      2) Filter sparse users/items
-      3) Reindex IDs to 0..N-1
-      4) Per-user 70/15/15 split
-      5) Build training pairs (with negative sampling)
-      6) Build val/test candidate sets (true + 99 negatives)
-      7) Save everything under `out_dir`
-
-    Files written:
-      - train_pairs.npz         (u, i, y) for BCE training
-      - val_users.npy,  val_cands.npy,  val_truths.npy
-      - test_users.npy, test_cands.npy, test_truths.npy
-      - mappings.pkl            (uid_map, iid_map, num_users, num_items)
-      - items_tfidf.npz, tfidf.pkl   (for content baseline)
-    """
-    os.makedirs(out_dir, exist_ok=True)
-
-    # 1) Load
-    anime, ratings = load_anime_ratings(data_dir)
-
-    # 2) Filter sparse -> better embeddings
-    ratings = filter_sparse(ratings, min_user_inter, min_item_inter)
-
-    # 3) Reindex to contiguous ids
-    ratings_idx, uid_map, iid_map = reindex_ids(ratings)
-    num_users = ratings_idx["u"].nunique()
-    num_items = ratings_idx["i"].nunique()
-
-    # 4) Per-user split
-    train, val, test = split_per_user(ratings_idx, seed=seed)
-
-    # 5) Training (pointwise) pairs with negatives
-    tr_u, tr_i, tr_y = build_pointwise_pairs(train, num_items, neg_k=neg_k, seed=seed)
-
-    # 6) Candidate sets for ranking eval (val/test)
-    vu, vt, vc = build_eval_candidates(train, val,  num_items, num_negs=num_eval_negs, seed=seed+1)
-    tu, tt, tc = build_eval_candidates(train, test, num_items, num_negs=num_eval_negs, seed=seed+2)
-
-    # Save arrays
-    np.savez_compressed(os.path.join(out_dir, "train_pairs.npz"), u=tr_u, i=tr_i, y=tr_y)
-    np.save(os.path.join(out_dir, "val_users.npy"),  vu)
-    np.save(os.path.join(out_dir, "val_truths.npy"), vt)
-    np.save(os.path.join(out_dir, "val_cands.npy"),  vc)
-    np.save(os.path.join(out_dir, "test_users.npy"),  tu)
-    np.save(os.path.join(out_dir, "test_truths.npy"), tt)
-    np.save(os.path.join(out_dir, "test_cands.npy"),  tc)
-
-    # ID maps + shapes (used by model/eval/app)
-    with open(os.path.join(out_dir, "mappings.pkl"), "wb") as f:
-        pickle.dump({"uids": uid_map, "iids": iid_map,
-                     "num_users": num_users, "num_items": num_items}, f)
-
-    return {"num_users": num_users, "num_items": num_items}
+        negs = rng.choice(pool, size=k, replace=False) if k > 0 else rng.choice(all_items, size=num_negs, replace=True)
+        cands.append(np.concatenate([[t], negs]))
+    return users, truths, np.stack(cands, axis=0)

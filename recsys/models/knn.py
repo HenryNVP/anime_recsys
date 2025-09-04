@@ -1,29 +1,38 @@
 import numpy as np
 import scipy.sparse as sp
-from sklearn.metrics.pairwise import cosine_similarity
 
 class UserKNN:
-    def __init__(self, k: int = 50):
-        self.k = k
-        self.user_sim = None
-        self.ui = None
+    """
+    Memory-based CF (user-user KNN) with on-the-fly sparse cosine.
+    Stores only UI CSR + per-user L2 norms. No full similarity matrix.
+    """
+    def __init__(self, k_neighbors: int = 50):
+        self.k = k_neighbors
+        self.ui: sp.csr_matrix | None = None
+        self.user_norms: np.ndarray | None = None
 
     def fit(self, u_pos: np.ndarray, i_pos: np.ndarray, num_users: int, num_items: int):
-        import scipy.sparse as sp
-        self.ui = sp.csr_matrix((np.ones(len(u_pos)), (u_pos, i_pos)),
-                                shape=(num_users, num_items))
-        from sklearn.metrics.pairwise import cosine_similarity
-        self.user_sim = cosine_similarity(self.ui)
-        np.fill_diagonal(self.user_sim, 0.0)
+        self.ui = sp.csr_matrix((np.ones(len(u_pos), dtype=np.float32),
+                                 (u_pos.astype(np.int32), i_pos.astype(np.int32))),
+                                 shape=(num_users, num_items))
+        # L2 norm per user (for cosine); add eps to avoid divide-by-zero
+        self.user_norms = np.sqrt(self.ui.multiply(self.ui).sum(axis=1)).ravel() + 1e-12
         return self
-    
-    def score_user_candidates(self, u: int, candidates: np.ndarray) -> np.ndarray:
-        if self.user_sim is None or self.ui is None:
-            raise RuntimeError("Model has not been fit yet. Call .fit() before scoring.")
-        sim = self.user_sim[u]
-        topk_idx = np.argpartition(-sim, self.k)[:self.k]
-        topk_sim = sim[topk_idx]
-        neigh_inter = self.ui[topk_idx][:, candidates].toarray()
-        scores = topk_sim @ neigh_inter
-        return scores
 
+    def score_user_candidates(self, u: int, candidates: np.ndarray) -> np.ndarray:
+        if self.ui is None or self.user_norms is None:
+            raise RuntimeError("UserKNN not fitted. Call .fit() first.")
+        # cosine similarity to all users: sim = (UI * u_row^T) / (||u|| * ||·||)
+        urow = self.ui.getrow(u)                                      # 1 x I
+        num = (self.ui @ urow.T).A1                                   # U
+        sim = num / (self.user_norms * (np.linalg.norm(urow.data) + 1e-12))
+        sim[u] = 0.0                                                  # drop self
+
+        # top-k neighbor indices
+        k = min(self.k, sim.size)
+        topk_idx = np.argpartition(-sim, k-1)[:k]
+        topk_sim = sim[topk_idx]                                      # (k,)
+
+        # neighbor interactions restricted to candidates
+        neigh_inter = self.ui[topk_idx][:, candidates].toarray()      # (k, |C|)
+        return topk_sim @ neigh_inter                                 # (|C|,)
