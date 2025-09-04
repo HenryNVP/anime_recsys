@@ -126,12 +126,12 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
 
     # NeuMF args
-    ap.add_argument("--epochs", type=int, default=20)
+    ap.add_argument("--epochs", type=int, default=10)
     ap.add_argument("--batch_size", type=int, default=8192)
     ap.add_argument("--lr", type=float, default=3e-3)
     ap.add_argument("--weight_decay", type=float, default=1e-6)
-    ap.add_argument("--emb_gmf", type=int, default=16)
-    ap.add_argument("--emb_mlp", type=int, default=32)
+    ap.add_argument("--emb_gmf", type=int, default=64)
+    ap.add_argument("--emb_mlp", type=int, default=64)
     ap.add_argument("--neg_k", type=int, default=4)
     ap.add_argument("--eval_k", type=int, default=10)
     ap.add_argument("--patience", type=int, default=3)
