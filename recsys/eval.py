@@ -3,7 +3,7 @@ import numpy as np
 import torch
 
 from .metrics import hr_ndcg_at_k
-from .models.neumf import NeuMF
+from models.neumf import NeuMF
 
 def _load_shapes(out_dir: str):
     with open(os.path.join(out_dir, "mappings.pkl"), "rb") as f:

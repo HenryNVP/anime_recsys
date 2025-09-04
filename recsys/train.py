@@ -4,7 +4,7 @@ from torch.utils.data import TensorDataset, DataLoader
 from tqdm import tqdm
 
 from .data import prepare_all
-from .models.neumf import NeuMF
+from models.neumf import NeuMF
 
 def train_neumf(
     data_dir="data", outputs="outputs",
@@ -60,7 +60,7 @@ def train_als(
     import numpy as np
     import scipy.sparse as sp
     from .data import prepare_all
-    from .models.als import ALSWrapper
+    from ..models.als import ALSWrapper
 
     # Prepare (or reuse) cached arrays
     stats = prepare_all(data_dir=data_dir, out_dir=outputs, seed=seed)
