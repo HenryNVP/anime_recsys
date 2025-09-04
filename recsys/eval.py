@@ -3,14 +3,15 @@ import numpy as np
 import torch
 
 from .metrics import hr_ndcg_at_k
-from models.neumf import NeuMF
+from .models.neumf import NeuMF
+from .models.knn import UserKNN
 
 def _load_shapes(out_dir: str):
     with open(os.path.join(out_dir, "mappings.pkl"), "rb") as f:
         m = pickle.load(f)
     return m["num_users"], m["num_items"]
 
-def eval_neumf(out_dir: str, split: str = "val", k: int = 10):
+def eval_neumf(out_dir: str, split: str, k: int):
     num_users, num_items = _load_shapes(out_dir)
     model = NeuMF(num_users, num_items)
     model.load_state_dict(torch.load(os.path.join(out_dir, "model.pt"), map_location="cpu"))
@@ -28,27 +29,31 @@ def eval_neumf(out_dir: str, split: str = "val", k: int = 10):
             uu = torch.full((len(cand),), u, dtype=torch.long, device=device)
             ii = torch.tensor(cand, dtype=torch.long, device=device)
             scores[r] = model(uu, ii).detach().cpu().numpy()
-
     return hr_ndcg_at_k(scores, k=k)
 
-def eval_als(out_dir: str, split: str = "val", k: int = 10):
-    # Load factors produced by train_als
-    user_f = np.load(os.path.join(out_dir, "als_user_factors.npy"))
-    item_f = np.load(os.path.join(out_dir, "als_item_factors.npy"))
+
+
+def eval_userknn(out_dir: str, split: str = "val", k: int = 10):
+    pack = np.load(os.path.join(out_dir, "userknn_model.npz"), allow_pickle=True)
+    user_sim, ui = pack["user_sim"], pack["ui"].item() if pack["ui"].shape == () else pack["ui"]
+
+    model = UserKNN()
+    model.user_sim, model.ui = user_sim, ui
 
     users = np.load(os.path.join(out_dir, f"{split}_users.npy"))
     cands = np.load(os.path.join(out_dir, f"{split}_cands.npy"))
 
     scores = np.zeros_like(cands, dtype=float)
     for r in range(cands.shape[0]):
-        u = int(users[r]); cand = cands[r]
-        scores[r] = item_f[cand] @ user_f[u]
+        u, cand = int(users[r]), cands[r]
+        scores[r] = model.score_user_candidates(u, cand)
+
     return hr_ndcg_at_k(scores, k=k)
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--outputs", type=str, default="outputs")
-    ap.add_argument("--model", type=str, default="neumf", choices=["neumf", "als"])
+    ap.add_argument("--model", type=str, default="neumf", choices=["neumf", "userknn"])
     ap.add_argument("--split", type=str, default="val", choices=["val", "test"])
     ap.add_argument("--k", type=int, default=10)
     args = ap.parse_args()
@@ -56,7 +61,7 @@ def main():
     if args.model == "neumf":
         hr, ndcg = eval_neumf(args.outputs, args.split, args.k)
     else:
-        hr, ndcg = eval_als(args.outputs, args.split, args.k)
+        hr, ndcg = eval_userknn(args.outputs, args.split, args.k)
 
     os.makedirs("results", exist_ok=True)
     out = {"model": args.model, "split": args.split, f"HR@{args.k}": hr, f"NDCG@{args.k}": ndcg}
