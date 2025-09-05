@@ -7,9 +7,12 @@ __pycache__/
 
 # data & artifacts
 /data/
+/data_mini/
 /checkpoints/
 /outputs/
+/output_mini/
 /results/
+/scripts/make_mini.py
 /kaggle.json
 *.pt
 *.pkl

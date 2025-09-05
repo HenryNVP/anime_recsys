@@ -16,7 +16,7 @@ class UserKNN:
                                  (u_pos.astype(np.int32), i_pos.astype(np.int32))),
                                  shape=(num_users, num_items))
         # L2 norm per user (for cosine); add eps to avoid divide-by-zero
-        self.user_norms = np.sqrt(self.ui.multiply(self.ui).sum(axis=1)).ravel() + 1e-12
+        self.user_norms = np.sqrt(np.asarray(self.ui.multiply(self.ui).sum(axis=1)).ravel()) + 1e-12
         return self
 
     def score_user_candidates(self, u: int, candidates: np.ndarray) -> np.ndarray:
@@ -24,7 +24,7 @@ class UserKNN:
             raise RuntimeError("UserKNN not fitted. Call .fit() first.")
         # cosine similarity to all users: sim = (UI * u_row^T) / (||u|| * ||·||)
         urow = self.ui.getrow(u)                                      # 1 x I
-        num = (self.ui @ urow.T).A1                                   # U
+        num = np.asarray((self.ui @ urow.T)).ravel()                               # U
         sim = num / (self.user_norms * (np.linalg.norm(urow.data) + 1e-12))
         sim[u] = 0.0                                                  # drop self
 

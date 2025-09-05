@@ -1,106 +1,83 @@
 # recsys/eval.py
 from __future__ import annotations
-import os, argparse, json
-import numpy as np
-import torch
+import os, argparse, json, numpy as np, torch
 from tqdm import tqdm
-from scipy.sparse import csr_matrix
+import pandas as pd
 
+from .metrics import hr_ndcg_at_k
+from .models.popularity import Popularity
+from .models.itemknn import ItemKNN
 from .models.neumf import NeuMF
-from .models.knn import UserKNN
 
+def _load_splits(out_dir: str):
+    train = pd.read_parquet(os.path.join(out_dir, "train.parquet"))
+    val   = pd.read_parquet(os.path.join(out_dir, "val.parquet"))
+    test  = pd.read_parquet(os.path.join(out_dir, "test.parquet"))
+    return train, val, test
 
-# ---------- shared metric helper ----------
-def hr_ndcg_at_k(scores: np.ndarray, k: int = 10):
-    """
-    Given scores (rows = users, cols = candidate items),
-    where col0 in each row is the TRUE item,
-    compute HR@k and NDCG@k.
-    """
-    order = np.argsort(-scores, axis=1)         # descending
-    topk = order[:, :k]
-    hits = (topk == 0).any(axis=1).astype(float)
-
-    pos = np.argwhere(order == 0)               # where truth appears
-    ranks = np.full(order.shape[0], order.shape[1], dtype=int)
-    ranks[pos[:, 0]] = pos[:, 1]
-
-    ndcg = np.where(ranks < k, 1.0 / np.log2(ranks + 2), 0.0)
-    return hits.mean(), ndcg.mean()
-
-
-# ---------- NeuMF eval ----------
-@torch.no_grad()
-def eval_neumf(out_dir: str, split: str = "test", k: int = 10, emb_gmf=16, emb_mlp=32, mlp_layers=(256,128,64)):
+def eval_popularity(out_dir: str, split: str, k: int):
     users = np.load(os.path.join(out_dir, f"{split}_users.npy"))
     cands = np.load(os.path.join(out_dir, f"{split}_cands.npy"))
+    pop = Popularity.load(out_dir)
+    scores = np.vstack([pop.score_candidates(c) for c in cands])
+    hr, ndcg = hr_ndcg_at_k(scores, k)
+    return hr, ndcg
 
-    meta = json.load(open(os.path.join(out_dir, "mappings.pkl"), "rb"))
-    num_users, num_items = meta["num_users"], meta["num_items"]
+def eval_itemknn(out_dir: str, split: str, k: int, use_k_neighbors: int):
+    users = np.load(os.path.join(out_dir, f"{split}_users.npy"))
+    cands = np.load(os.path.join(out_dir, f"{split}_cands.npy"))
+    train, _, _ = _load_splits(out_dir)
+    user_seen = train.groupby("u")["i"].apply(lambda s: s.to_numpy(np.int64)).to_dict()
 
-    # rebuild model with correct dims
+    knn = ItemKNN.load(out_dir)
+    scores = np.zeros_like(cands, dtype=np.float32)
+    for r in tqdm(range(cands.shape[0]), desc=f"Eval ItemKNN (use_k={use_k_neighbors})"):
+        u = int(users[r]); cand = cands[r]
+        seen = user_seen.get(u, np.empty(0, dtype=np.int64))
+        scores[r] = knn.score_user_candidates(seen, cand, use_k=use_k_neighbors)
+    return hr_ndcg_at_k(scores, k)
+
+@torch.no_grad()
+def eval_neumf(out_dir: str, split: str, k: int, emb_gmf=64, emb_mlp=64, mlp_layers=(256,128,64)):
+    users = np.load(os.path.join(out_dir, f"{split}_users.npy"))
+    cands = np.load(os.path.join(out_dir, f"{split}_cands.npy"))
+    # with open(os.path.join(out_dir, "mappings.pkl"), "rb") as f:
+    #     m = np.load.__self__.file = None  # silence type hints
+    # load dims
+    import pickle
+    m = pickle.load(open(os.path.join(out_dir, "mappings.pkl"), "rb"))
+    num_users, num_items = m["num_users"], m["num_items"]
+
     model = NeuMF(num_users, num_items, emb_gmf=emb_gmf, emb_mlp=emb_mlp, mlp_layers=mlp_layers)
-    model.load_state_dict(torch.load(os.path.join(out_dir, "model.pt"), map_location="cpu"))
-    model.eval()
-
+    model.load_state_dict(torch.load(os.path.join(out_dir, "neumf.pt"), map_location="cpu"))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
+    model.to(device).eval()
 
     scores = np.zeros_like(cands, dtype=float)
     for r in tqdm(range(cands.shape[0]), desc=f"Eval NeuMF ({split})"):
         u = int(users[r]); cand = cands[r]
         uu = torch.full((len(cand),), u, dtype=torch.long, device=device)
         ii = torch.tensor(cand, dtype=torch.long, device=device)
-        s = model(uu, ii).detach().cpu().numpy()
-        scores[r] = s
+        scores[r] = model(uu, ii).detach().cpu().numpy()
+    return hr_ndcg_at_k(scores, k)
 
-    hr, ndcg = hr_ndcg_at_k(scores, k=k)
-    return hr, ndcg
-
-
-# ---------- UserKNN eval ----------
-def eval_userknn(out_dir: str, split: str = "test", k: int = 10):
-    users = np.load(os.path.join(out_dir, f"{split}_users.npy"))
-    cands = np.load(os.path.join(out_dir, f"{split}_cands.npy"))
-
-    pack = np.load(os.path.join(out_dir, "userknn_ui.npz"), allow_pickle=False)
-    ui = csr_matrix((pack["data"], pack["indices"], pack["indptr"]), shape=tuple(pack["shape"]))
-    norms = pack["norms"]
-
-    with open(os.path.join(out_dir, "userknn_meta.json")) as f:
-        meta = json.load(f)
-    k_neigh = meta.get("k_neighbors", 50)
-
-    model = UserKNN(k_neighbors=k_neigh)
-    model.ui = ui
-    model.user_norms = norms
-
-    scores = np.zeros_like(cands, dtype=float)
-    for r in tqdm(range(cands.shape[0]), desc=f"Eval UserKNN ({split})"):
-        scores[r] = model.score_user_candidates(int(users[r]), cands[r])
-
-    hr, ndcg = hr_ndcg_at_k(scores, k=k)
-    return hr, ndcg
-
-
-# ---------- CLI ----------
 def main():
-    ap = argparse.ArgumentParser(description="Evaluate models on Anime dataset")
-    ap.add_argument("--model", type=str, required=True, choices=["neumf", "userknn"])
-    ap.add_argument("--split", type=str, default="test", choices=["val", "test"])
-    ap.add_argument("--outputs", type=str, default="outputs")
+    ap = argparse.ArgumentParser(description="Evaluate models (popularity, itemknn, neumf)")
+    ap.add_argument("--model", required=True, choices=["popularity", "itemknn", "neumf"])
+    ap.add_argument("--outputs", default="outputs")
+    ap.add_argument("--split", default="test", choices=["val", "test"])
     ap.add_argument("--k", type=int, default=10)
+    ap.add_argument("--use_k_neighbors", type=int, default=50, help="for itemknn: neighbors to use at inference (<= max_neighbors)")
     args = ap.parse_args()
 
-    if args.model == "neumf":
-        hr, ndcg = eval_neumf(args.outputs, split=args.split, k=args.k)
-    elif args.model == "userknn":
-        hr, ndcg = eval_userknn(args.outputs, split=args.split, k=args.k)
+    if args.model == "popularity":
+        hr, ndcg = eval_popularity(args.outputs, args.split, args.k)
+    elif args.model == "itemknn":
+        hr, ndcg = eval_itemknn(args.outputs, args.split, args.k, args.use_k_neighbors)
     else:
-        raise ValueError(f"Unknown model type: {args.model}")
+        hr, ndcg = eval_neumf(args.outputs, args.split, args.k)
 
     print(json.dumps({f"HR@{args.k}": hr, f"NDCG@{args.k}": ndcg}, indent=2))
-
 
 if __name__ == "__main__":
     main()
