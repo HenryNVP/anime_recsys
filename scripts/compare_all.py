@@ -12,7 +12,6 @@ def main():
     ap.add_argument("--split", default="test", choices=["val","test"])
     ap.add_argument("--Ks", type=str, default="5,10,20")
     ap.add_argument("--use_k_neighbors", type=int, default=50)  # for itemknn
-    ap.add_argument("--include_hybrid", action="store_true", default=False)
     args = ap.parse_args()
 
     Ks = [int(x) for x in args.Ks.split(",") if x.strip()]
@@ -33,14 +32,13 @@ def main():
         hr, ndcg = eval_neumf(args.outputs, args.data_dir, args.split, K)
         results[K]["neumf"] = (hr, ndcg)
 
-        # Hybrid (optional)
-        if args.include_hybrid:
-            hr, ndcg = eval_hybrid(args.outputs, args.data_dir, args.split, K)
-            results[K]["hybrid"] = (hr, ndcg)
+        # Hybrid
+        hr, ndcg = eval_hybrid(args.outputs, args.data_dir, args.split, K)
+        results[K]["hybrid"] = (hr, ndcg)
 
     # pretty print
     print("\n=== Summary ===")
-    models = ["popularity", "itemknn", "neumf"] + (["hybrid"] if args.include_hybrid else [])
+    models = ["popularity", "itemknn", "neumf", "hybrid"]
     for K in Ks:
         print(f"\nK={K}")
         for m in models:

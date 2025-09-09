@@ -39,4 +39,4 @@ class NeuMF(nn.Module):
         m = torch.cat([self.user_mlp(u), self.item_mlp(i)], dim=1)
         m = self.mlp(m)                                    # MLP
         x = torch.cat([g, m], dim=1)
-        return torch.sigmoid(self.fc(x).squeeze(-1))
+        return self.fc(x).squeeze(-1)

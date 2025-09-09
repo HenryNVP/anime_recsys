@@ -18,8 +18,8 @@ class HybridNeuMF(nn.Module):
         num_users: int,
         num_items: int,
         feat_dim: int,                # dimension of side features
-        emb_gmf: int = 32,
-        emb_mlp: int = 32,
+        emb_gmf: int = 64,
+        emb_mlp: int = 64,
         feat_proj: int = 32,
         mlp_layers: tuple[int, ...] = (256, 128, 64),
         dropout: float = 0.0,
@@ -81,4 +81,4 @@ class HybridNeuMF(nn.Module):
 
         # --- Concatenate and predict
         z = torch.cat([gmf, mlp_out], dim=-1)
-        return torch.sigmoid(self.out(z)).squeeze(-1)
+        return self.out(z).squeeze(-1)
