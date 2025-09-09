@@ -1,44 +1,59 @@
+# scripts/compare_all.py
 from __future__ import annotations
-import os, argparse, pandas as pd
-from recsys.eval import eval_popularity, eval_itemknn, eval_neumf
+import os, argparse, json
+import numpy as np
+
+from recsys.eval import eval_popularity, eval_itemknn, eval_neumf, eval_hybrid
 
 def main():
-    ap = argparse.ArgumentParser(description="Compare all models on val/test")
+    ap = argparse.ArgumentParser(description="Compare models on val/test for Ks")
+    ap.add_argument("--data_dir", default="data_clean")
     ap.add_argument("--outputs", default="outputs")
+    ap.add_argument("--split", default="test", choices=["val","test"])
     ap.add_argument("--Ks", type=str, default="5,10,20")
-    ap.add_argument("--use_k_neighbors", type=int, default=50,
-                    help="neighbors to use at inference for ItemKNN (<= max_neighbors)")
-    ap.add_argument("--csv_out", default="compare_results.csv")
+    ap.add_argument("--use_k_neighbors", type=int, default=50)  # for itemknn
+    ap.add_argument("--include_hybrid", action="store_true", default=False)
     args = ap.parse_args()
 
     Ks = [int(x) for x in args.Ks.split(",") if x.strip()]
-    rows = []
+    results = {k: {} for k in Ks}
 
-    for split in ["val", "test"]:
-        for model in ["popularity", "itemknn", "neumf"]:
-            for K in Ks:
-                if model == "popularity":
-                    hr, ndcg = eval_popularity(args.outputs, split, K)
-                elif model == "itemknn":
-                    hr, ndcg = eval_itemknn(args.outputs, split, K, args.use_k_neighbors)
-                else:
-                    hr, ndcg = eval_neumf(args.outputs, split, K)
+    for K in Ks:
+        print(f"\n=== K={K} on {args.split} ===")
 
-                rows.append({
-                    "Split": split.upper(),
-                    "Model": f"{model}{'' if model!='itemknn' else f'(k={args.use_k_neighbors})'}",
-                    "TopK": K,
-                    "HR": hr,
-                    "NDCG": ndcg,
-                })
+        # Popularity
+        hr, ndcg = eval_popularity(args.outputs, args.split, K)
+        results[K]["popularity"] = (hr, ndcg)
 
-    df = pd.DataFrame(rows)
+        # ItemKNN
+        hr, ndcg = eval_itemknn(args.outputs, args.data_dir, args.split, K, args.use_k_neighbors)
+        results[K]["itemknn"] = (hr, ndcg)
 
-    print("\n=== Comparison Results ===")
-    print(df.to_string(index=False, float_format=lambda x: f"{x:.4f}"))
+        # NeuMF
+        hr, ndcg = eval_neumf(args.outputs, args.data_dir, args.split, K)
+        results[K]["neumf"] = (hr, ndcg)
 
-    df.to_csv(args.csv_out, index=False)
-    print(f"\n✅ Saved results to {args.csv_out}")
+        # Hybrid (optional)
+        if args.include_hybrid:
+            hr, ndcg = eval_hybrid(args.outputs, args.data_dir, args.split, K)
+            results[K]["hybrid"] = (hr, ndcg)
+
+    # pretty print
+    print("\n=== Summary ===")
+    models = ["popularity", "itemknn", "neumf"] + (["hybrid"] if args.include_hybrid else [])
+    for K in Ks:
+        print(f"\nK={K}")
+        for m in models:
+            if m in results[K]:
+                hr, ndcg = results[K][m]
+                print(f"  {m:12s}  HR@{K}={hr:.4f}  NDCG@{K}={ndcg:.4f}")
+
+    # optional: save JSON
+    out_json = os.path.join(args.outputs, f"compare_{args.split}.json")
+    with open(out_json, "w") as f:
+        json.dump({str(k): {m: {"HR": float(v[0]), "NDCG": float(v[1])} for m, v in results[k].items()} for k in Ks},
+                  f, indent=2)
+    print(f"\nSaved: {out_json}")
 
 if __name__ == "__main__":
     main()
