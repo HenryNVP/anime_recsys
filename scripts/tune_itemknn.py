@@ -9,7 +9,7 @@ def main():
     ap.add_argument("--eval_k", type=int, default=10)
     ap.add_argument("--max_k", type=int, default=200)
     ap.add_argument("--step", type=int, default=10)
-    ap.add_argument("--csv_out", default="itemknn_tuning.csv")
+    ap.add_argument("--csv_out", default="outputs/itemknn_tuning.csv")
     args = ap.parse_args()
 
     # ensure required artifacts exist (produced by: python -m recsys.train --trainer itemknn ...)
